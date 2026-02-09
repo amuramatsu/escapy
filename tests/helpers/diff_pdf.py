@@ -39,7 +39,8 @@ def is_similar_pdfs(ref_pdf_path: Path | str, tested_pdf_path: Path | str):
 
     diff_output_file = Path(f"/tmp/diff_{ref_file_name}_vs_{tested_file_name}.pdf")
     diffpdf_cmd = [
-        "/usr/bin/diff-pdf",
+        #"/usr/bin/diff-pdf",
+        "diff-pdf",
         f"--output-diff={diff_output_file}",
         # f"--dpi=720",
         ref_pdf_path,

@@ -32,9 +32,17 @@ LOGGER = logger()
 esc_grammar = r"""
     start: instruction+
 
-    instruction:  tiff_compressed_rule
+    instruction: instruction_sb
         | remote_mode
+
+    instruction_sb: kanji_block
+        | instruction_jp_cmd
+        | FS_UNKNOWN             -> unsupported_j84_command
+        | instruction_other
         | ANYTHING               -> binary_blob
+
+    # Other commands are valid both inside and outside a kanji block.
+    instruction_other: tiff_compressed_rule
         | TRASH
         | INIT                   -> reset_printer
 
@@ -222,6 +230,38 @@ esc_grammar = r"""
         # D4 mode ?
         | ESC SOH "@EJL 1284.4\n@EJL\n@EJL\n"         -> enter_d4
 
+    # Kanji mode: FS & ... FS .
+    # The block can contain kanji data, FS commands and regular ESC/P commands
+    # (line feeds, positioning, graphics...).
+    kanji_block: FS "&" instruction_jp* FS "."
+
+    instruction_jp: KANJI -> kanji_print
+        | ANYTHING -> kanji_print
+        | instruction_jp_cmd
+        | FS_UNKNOWN -> unsupported_j84_command
+        | instruction_other
+
+    # J84 commands can also appear outside a kanji block.
+    # Keep their second bytes in sync with the FS_UNKNOWN terminal below.
+    instruction_jp_cmd: FS SI -> set_hankaku_width_printing
+        | FS DC2 -> unset_hankaku_width_printing
+        | FS "r" BIN_ARG_EX -> switch_script_printing_jp
+        | FS "x" BIN_ARG_EX -> select_letter_quality_or_draft_jp
+        | FS SO -> set_double_width_printing_jp
+        | FS DC4 -> unset_double_width_printing_jp
+        | FS "W" BIN_ARG_EX -> switch_quad_size_printing_jp
+        | FS "J" -> set_tategaki_printing
+        | FS "K" -> unset_tategaki_printing
+        | FS "D" BYTE_ARG BYTE_ARG BYTE_ARG BYTE_ARG -> hankaku_tate_kumi_printing
+        | FS "-" J84_UNDERLINE_ARG -> switch_underline_jp
+        | FS "!" BYTE_ARG -> master_select_jp
+        | FS "k" BIN_ARG_EX -> select_typeface_jp
+        | FS "S" HALF_BYTE_ARG HALF_BYTE_ARG -> set_zenkaku_intercharacter_space
+        | FS "T" HALF_BYTE_ARG HALF_BYTE_ARG -> set_hankaku_intercharacter_space
+        | FS "U" -> set_hankaku_zenkaku_adjust
+        | FS "V" -> unset_hankaku_zenkaku_adjust
+        | FS "2\x77" GAIJI_CODE GAIJI_BITMAP -> define_gaiji
+
     tiff_compressed_rule.2: tiff_enter tiff_instruction* exit_ex
     # ESC . 2 / ESC . 3
     tiff_enter: ESC "." PRINT_TIFF_RASTER_GRAPHICS_HEADER -> print_tiff_raster_graphics
@@ -269,7 +309,17 @@ esc_grammar = r"""
     # Note: Upper control codes are not mentioned here; it's a deliberate choice,
     # as they are not mentioned as possible commands in the documentation
     # (ranges: 80 87-8f 91-94 98 99 9B).
-    ANYTHING.-1: /[^\x00\x07-\x0f\x11-\x14\x18\x1b\x7f]+/
+    ANYTHING.-1: /[^\x00\x07-\x0f\x11-\x14\x18\x1b\x1c\x7f]+/
+
+    # KANJI character: 2-byte JIS X 0208 code (ku-ten in 0x21-0x7e).
+    # Lower priority than ANYTHING: outside a kanji block, ordinary text that
+    # happens to look like 2-byte JIS codes must stay plain text. Inside a
+    # block it is the fallback when ANYTHING cannot be used.
+    KANJI.-2: /([\x21-\x7e]{2})+/
+
+    # Kanji user-defined characters (gaiji): FS 2 0x77 <code> <72-byte bitmap>
+    GAIJI_CODE: /[\x21-\x7e]/
+    GAIJI_BITMAP: /[\x00-\xff]{72}/
 
     # Used for extra codes that can be inserted without any meaning, not printable,
     # or without belonging to a command (NUL bytes for example).
@@ -321,6 +371,10 @@ esc_grammar = r"""
     INIT: ESC "@"
     SELECT_XDPI_GRAPHICS_CMD: /[KLYZ]/
 
+    # Unknown FS command: consume the FS byte and its command byte so that an
+    # unsupported J84 command does not abort the whole parsing.
+    FS_UNKNOWN: /\x1c[^\x0e\x0f\x12\x14\x21\x26\x2d\x2e\x32\x44\x4a\x4b\x53\x54\x55\x56\x57\x6b\x72\x78]/
+
     # 0 1 2 3 4 5 6 7 32 33 38 39 40 71 72 73 + 64 65 70
     SELECT_BIT_IMAGE_HEADER: /[\x00-\x07\x20\x21\x26-\x28\x40\x41\x46-\x49].[\x00-\x1f]/s
     SELECT_BIT_IMAGE_9PINS_HEADER: /[\x00\x01].[\x00-\x1f]/s
@@ -354,6 +408,8 @@ esc_grammar = r"""
 
     BIN_ARG: /[\x00\x01]/
     BIN_ARG_EX: /[01\x00\x01]/
+    # FS - accepts 0 (off), 1 (1-dot) and 2 (2-dot) underlines.
+    J84_UNDERLINE_ARG: /[012\x00\x01\x02]/
     HALF_BYTE_ARG: /[\x00-\x7f]/
     BYTE_ARG: /./s
     # use [\x00-\xff] or /./s

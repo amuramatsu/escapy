@@ -108,6 +108,105 @@ class PrintScripting(Enum):
     SUB = 1
 
 
+# ESC/P 24-J84C kanji character cells: 24x24 dots at 180 dpi.
+J84_ZENKAKU_WIDTH = 24 / 180  # inches
+J84_HANKAKU_WIDTH = 12 / 180  # inches
+J84_BASE_POINT_SIZE = J84_ZENKAKU_WIDTH * 72  # 9.6 points
+
+
+def decode_j84_text(raw_text, gaiji=None):
+    """Decode ESC/P 24-J84C character data into unicode text.
+
+    The printer sends JIS X 0208 characters as 2-byte codes in the
+    0x21-0x7e range; half-width kana are sent as single bytes in the
+    0xa1-0xdf range. A 0x20 byte is kept as an ASCII space.
+
+    :param raw_text: Raw bytes of a kanji data token.
+    :type raw_text: bytes | bytearray
+    :param gaiji: User-defined characters, keyed by ``(0x77, code)``.
+    :type gaiji: dict | None
+    :return: Decoded text and the cell width of each character in em
+        (1.0 for a zenkaku character, 0.5 for a half-width one).
+    :rtype: tuple[str, list[float]]
+    """
+    gaiji = gaiji or {}
+    chars = []
+    widths = []
+    index = 0
+    length = len(raw_text)
+
+    while index < length:
+        byte = raw_text[index]
+
+        if byte == 0x20:
+            chars.append(" ")
+            widths.append(0.5)
+            index += 1
+            continue
+
+        if 0x21 <= byte <= 0x7E:
+            if index + 1 >= length:
+                LOGGER.warning("Truncated J84 character at offset %d", index)
+                break
+
+            second = raw_text[index + 1]
+            if not 0x21 <= second <= 0x7E:
+                LOGGER.warning(
+                    "Invalid J84 character code: 0x%02x 0x%02x", byte, second
+                )
+                index += 1
+                continue
+
+            index += 2
+            if byte == 0x77:
+                # User-defined character. The bitmap is stored but not drawn yet.
+                if (byte, second) not in gaiji:
+                    LOGGER.warning(
+                        "Undefined user-defined character: 0x77 0x%02x", second
+                    )
+                chars.append("〓")
+            else:
+                decoded = bytes((byte | 0x80, second | 0x80)).decode(
+                    "euc-jp", errors="replace"
+                )
+                chars.append(decoded if decoded != "\ufffd" else "〓")
+            widths.append(1.0)
+            continue
+
+        if 0xA1 <= byte <= 0xDF:
+            # Half-width kana: EUC-JP uses the 0x8e prefix for them.
+            decoded = bytes((0x8E, byte)).decode("euc-jp", errors="replace")
+            chars.append(decoded if decoded != "\ufffd" else "〓")
+            widths.append(0.5)
+            index += 1
+            continue
+
+        LOGGER.warning("Unsupported J84 byte: 0x%02x", byte)
+        index += 1
+
+    return "".join(chars), widths
+
+
+def group_j84_runs(text, widths):
+    """Group consecutive characters sharing the same cell width.
+
+    :param text: Decoded text.
+    :type text: str
+    :param widths: Cell width of each character (see :func:`decode_j84_text`).
+    :type widths: list[float]
+    :return: List of ``(text, cell_width)`` tuples.
+    :rtype: list[tuple[str, float]]
+    """
+    runs = []
+    for char, width in zip(text, widths):
+        if runs and runs[-1][1] == width:
+            runs[-1][0].append(char)
+        else:
+            runs.append(([char], width))
+
+    return [("".join(chars), width) for chars, width in runs]
+
+
 class PrintControlCodes(Enum):
     """Sections of control codes enumeration & definitions as values
 
@@ -128,6 +227,23 @@ class PrintControlCodes(Enum):
 
 
 LOGGER = logger()
+
+# Grammar rules which only group other rules (or commands): their children must
+# be parsed recursively. Must be kept in sync with `esc_grammar`.
+# NOTE: `remote_instruction` is deliberately excluded: its unaliased branch traps
+# unknown/not implemented remote commands and must be logged as such.
+CONTAINER_RULES = frozenset(
+    {
+        "start",
+        "instruction",
+        "instruction_sb",
+        "instruction_other",
+        "instruction_jp",
+        "kanji_block",
+        "tiff_compressed_rule",
+        "remote_mode",
+    }
+)
 
 
 class ESCParser:
@@ -155,6 +271,7 @@ class ESCParser:
         dots_as_circles=True,
         userdef_db_filepath=USER_DEFINED_DB_FILE,
         userdef_images_path=None,
+        japanese_fonts=None,
         pdf=True,
         output_file="output.pdf",
         **_,
@@ -188,6 +305,9 @@ class ESCParser:
             By forcing autoscaling fallback we choose to use & scale the not
             condensed font variant instead of just using it (if it exists) without
             applying a horizontal scale coeffcient.
+        :key japanese_fonts: Paths of the fonts used for ESC/P 24-J84C Kanji
+            and half-width kana. Expected keys: `mincho`, `gothic` and
+            `hankaku`. A None/empty value keeps the built-in CID font fallback.
         :key pdf: Enable pdf generation via reportlab. (default: True).
         :key output_file: Output filepath. (default: output.pdf).
         :type code: bytes
@@ -197,6 +317,7 @@ class ESCParser:
         :type single_sheets: bool
         :type automatic_linefeed: bool
         :type dots_as_circles: bool
+        :type japanese_fonts: dict[str, str | None]
         :type pdf: bool
         :type output_file: io.TextIOWrapper | str | Path
         """
@@ -218,6 +339,26 @@ class ESCParser:
         # Render dots as circles or rectangles
         self.dots_as_circles = dots_as_circles
         self.current_pdf = None
+
+        # ESC/P 24-J84C (Japanese) state
+        self.kanji_fontname = None
+        self.kanji_fontname_gothic = None
+        self.hankaku_fontname = None
+        # Paths configured in escapy.conf for ESC/P 24-J84C fonts.
+        self.japanese_fonts = japanese_fonts or {}
+        self.hankaku_mode = False
+        self.jp_double_height = False
+        self.jp_scripting: None | PrintScripting = None
+        self.jp_underline = 0
+        self.jp_typeface = "mincho"
+        self.jp_zenkaku_space_L = 0
+        self.jp_zenkaku_space_R = 3
+        self.jp_hankaku_space_L = 0
+        self.jp_hankaku_space_R = 2
+        self.jp_hankaku_zenkaku_adjust = False
+        self.jp_tategaki = False
+        self.jp_hankaku_tate_kumi = []
+        self.gaiji = {}
 
         if automatic_linefeed:
             # CR will be accompanied by LF;
@@ -282,6 +423,10 @@ class ESCParser:
                 output_file = output_file.buffer
             else:
                 output_file = str(output_file)
+            # Register the fallback Japanese CID fonts and the optional
+            # user-configured TTF fonts for ESC/P 24-J84C kanji printing.
+            self._register_japanese_fonts()
+
             self.current_pdf = Canvas(
                 output_file, pagesize=page_size, pageCompression=1
             )
@@ -5013,6 +5158,499 @@ class ESCParser:
         # Reset point_size to 10.5 Todo: use default point size instead
         # self.cancel_multipoint_mode()
 
+    def kanji_print(self, arg):
+        """Print ESC/P 24-J84C kanji and half-width kana characters.
+
+        Kanji cells are 24x24 dots at 180 dpi (9.6 points at 72 dpi); half-width
+        characters use a 12-dot cell. Cursor advancement is computed from these
+        cell sizes instead of the metrics of the Latin font.
+
+        .. note:: About the printing baseline:
+            The baseline for printing characters is 20/180 inch
+            (7/72 inch for 9-pin printers) below the vertical print position.
+
+            This offset is for characters only, not graphics !
+
+            For graphics printing, the print position is the top printable
+            row of dots (see in concerned functions).
+        """
+        raw_text = bytes(arg.value)
+        text, widths = decode_j84_text(raw_text, self.gaiji)
+        if not text:
+            return
+
+        # Compose glyph scaling independently for width and height, so that
+        # modes such as half-width + double-width or FS W + scripting combine
+        # as expected.
+        width_scale = 1.0
+        height_scale = 1.0
+        if self.double_width or self.jp_double_height:
+            if self.double_width:
+                width_scale *= 2
+            if self.jp_double_height:
+                height_scale *= 2
+        elif self.jp_scripting is not None:
+            width_scale *= 0.5
+            height_scale *= 0.5
+        elif self.hankaku_mode:
+            width_scale *= 0.5
+
+        point_size = J84_BASE_POINT_SIZE * height_scale
+        # The point size already includes the height scale: compensate it in
+        # the horizontal scale so that the rendered width only depends on
+        # width_scale.
+        horizontal_scale = width_scale / height_scale
+
+        rise = 0.0
+        if not (self.double_width or self.jp_double_height):
+            if self.jp_scripting is PrintScripting.SUP:
+                rise = J84_BASE_POINT_SIZE / 3
+            elif self.jp_scripting is PrintScripting.SUB:
+                rise = -J84_BASE_POINT_SIZE / 3
+
+        cursor_y = self.cursor_y - self.baseline_offset
+
+        for run, cell_width in group_j84_runs(text, widths):
+            # FS S sets the spacing of zenkaku characters; FS T sets the
+            # spacing of half-width kana, half-width kanji and scripts.
+            hankaku = (
+                self.hankaku_mode
+                or self.jp_scripting is not None
+                or cell_width < 1.0
+            )
+            space_L = (
+                self.jp_hankaku_space_L if hankaku else self.jp_zenkaku_space_L
+            )
+            space_R = self.jp_hankaku_space_R if hankaku else self.jp_zenkaku_space_R
+            if hankaku and self.jp_hankaku_zenkaku_adjust:
+                space_R += 0.5
+
+            # The manual specifies that the configured spacing is doubled when
+            # horizontal expansion is selected.
+            if self.double_width:
+                space_L *= 2
+                space_R *= 2
+
+            # Intercharacter space (FS S / FS T) is expressed in dots.
+            space_L /= 180  # inches
+            space_R /= 180  # inches
+
+            if self.current_pdf:
+                fontname = self._kanji_fontname(cell_width)
+                textobject = self.current_pdf.beginText(
+                    (self.cursor_x + space_L) * 72, cursor_y * 72
+                )
+                textobject.setFont(fontname, point_size)
+                textobject.setRise(rise)
+                textobject.setCharSpace((space_L + space_R) * 72)
+                textobject.setHorizScale(horizontal_scale * 100)
+                textobject.textOut(run)
+                textobject.setRise(0)
+                textobject.setHorizScale(100)
+                self.current_pdf.drawText(textobject)
+
+            # Actualize the x cursor with the width of the character cells and
+            # their left/right intercharacter spaces.
+            self.cursor_x += (
+                cell_width * J84_BASE_POINT_SIZE / 72 * width_scale
+                + space_L
+                + space_R
+            ) * len(run)
+
+        # Restore the previously selected font after kanji printing.
+        if self.current_pdf:
+            self.set_font()
+
+    def _register_japanese_fonts(self):
+        """Register the Japanese fonts used by ESC/P 24-J84C printing.
+
+        Built-in ReportLab CID fonts are always registered as fallback. Fonts
+        configured in the ``[Japanese]`` section of ``escapy.conf`` then
+        override them for the Mincho, Gothic and half-width kana typefaces.
+        """
+        try:
+            from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+            for fontname in ("HeiseiMin-W3", "HeiseiKakuGo-W5"):
+                if fontname not in pdfmetrics.getRegisteredFontNames():
+                    pdfmetrics.registerFont(UnicodeCIDFont(fontname))
+
+            self.kanji_fontname = "HeiseiMin-W3"
+            self.kanji_fontname_gothic = "HeiseiKakuGo-W5"
+        except Exception:  # pragma: no cover
+            self.kanji_fontname = None
+            self.kanji_fontname_gothic = None
+
+        self.kanji_fontname = self._register_ttf_font(
+            "mincho", fallback=self.kanji_fontname
+        )
+        gothic_fontname = self._register_ttf_font(
+            "gothic", fallback=self.kanji_fontname_gothic
+        )
+        if not self.japanese_fonts.get("gothic") and self.kanji_fontname not in (
+            None,
+            "HeiseiMin-W3",
+        ):
+            # A custom Mincho font is configured: use it for Gothic too,
+            # unless a dedicated Gothic font is available.
+            gothic_fontname = self.kanji_fontname
+        self.kanji_fontname_gothic = gothic_fontname
+        # None means that half-width kana use the selected Kanji font.
+        self.hankaku_fontname = self._register_ttf_font("hankaku")
+
+    @staticmethod
+    def _ttf_fontname(filepath):
+        """Build a stable and unique ReportLab font name for a TTF file.
+
+        :param filepath: Path of the font file.
+        :type filepath: Path | str
+        :rtype: str
+        """
+        path = Path(filepath)
+        digest = md5(str(path).encode()).hexdigest()[:8]
+        stem = "".join(
+            char if char.isalnum() or char in "-_" else "_" for char in path.stem
+        )
+        return f"J84-{stem[:32]}-{digest}"
+
+    def _register_ttf_font(self, font_key, fallback=None):
+        """Register a TTF/OTF font configured for ESC/P 24-J84C.
+
+        :param font_key: Key of the font in ``[Japanese]`` (mincho, gothic or
+            hankaku).
+        :type font_key: str
+        :param fallback: Font name returned if no font is configured or if
+            registration fails.
+        :type fallback: str | None
+        :return: Registered ReportLab font name or fallback.
+        :rtype: str | None
+        """
+        filepath = self.japanese_fonts.get(font_key)
+        if not filepath:
+            return fallback
+
+        path = Path(filepath).expanduser()
+        if not path.is_file():
+            LOGGER.error("Japanese: %s font file not found (%s).", font_key, path)
+            return fallback
+
+        fontname = self._ttf_fontname(path)
+        if fontname not in pdfmetrics.getRegisteredFontNames():
+            try:
+                pdfmetrics.registerFont(TTFont(fontname, str(path)))
+            except Exception as exc:  # pragma: no cover - depends on font file
+                LOGGER.error(
+                    "Japanese: unable to register %s font <%s>: %s",
+                    font_key,
+                    path,
+                    exc,
+                )
+                return fallback
+
+        return fontname
+
+    def _kanji_fontname(self, cell_width=1.0):
+        """Return the font name used for ESC/P 24-J84C characters.
+
+        :param cell_width: Width of the character cell: 1.0 for zenkaku
+            characters, 0.5 for half-width kana.
+        :type cell_width: float
+        :rtype: str
+        """
+        if cell_width < 1.0 and self.hankaku_fontname:
+            return self.hankaku_fontname
+        if self.jp_typeface == "gothic" and self.kanji_fontname_gothic:
+            return self.kanji_fontname_gothic
+        return self.kanji_fontname or "Helvetica"
+
+    ###########################################################################
+    # ESC/P 24-J84C (Japanese) commands
+    ###########################################################################
+
+    @staticmethod
+    def _j84_byte_args(args):
+        """Extract byte values from the tokens of a J84 command.
+
+        The leading ``FS`` token is ignored.
+
+        :param args: Tokens sent by :meth:`run_esc_instruction`.
+        :type args: tuple
+        :return: Flat list of byte values.
+        :rtype: list[int]
+        """
+        values = []
+        # The first token is always the FS control code.
+        for arg in args[1:]:
+            value = getattr(arg, "value", arg)
+            if isinstance(value, int):
+                value = bytes((value,))
+            elif isinstance(value, str):
+                value = value.encode("latin-1")
+            values.extend(value)
+        return values
+
+    @staticmethod
+    def _j84_binary_value(value):
+        """Interpret a ``BIN_ARG_EX`` value (0/1 or ASCII "0"/"1").
+
+        :rtype: bool
+        """
+        if isinstance(value, (bytes, bytearray)):
+            value = value[0] if value else 0
+        return value in (1, 49)
+
+    @classmethod
+    def _j84_last_binary_value(cls, args):
+        """Return the last argument of *args* as a boolean.
+
+        :rtype: bool
+        """
+        value = None
+        for arg in args:
+            value = getattr(arg, "value", arg)
+        return cls._j84_binary_value(value)
+
+    @staticmethod
+    def _j84_numeric_value(value):
+        """Interpret a J84 numeric argument.
+
+        Both binary values (0x00, 0x01, 0x02) and their ASCII representation
+        ("0", "1", "2") are accepted.
+
+        :rtype: int
+        """
+        if isinstance(value, (bytes, bytearray)):
+            value = value[0] if value else 0
+        if 0x30 <= value <= 0x39:
+            return value - 0x30
+        return value
+
+    @classmethod
+    def _j84_last_numeric_value(cls, args):
+        """Return the last argument of *args* as an integer.
+
+        :rtype: int
+        """
+        value = 0
+        for arg in args:
+            value = getattr(arg, "value", arg)
+        return cls._j84_numeric_value(value)
+
+    def unsupported_j84_command(self, *args):
+        """Warn about an unsupported FS command and ignore it.
+
+        .. todo:: Add the real handler when the 24-J84C manual is available.
+        """
+        value = b""
+        for arg in args:
+            value = getattr(arg, "value", arg)
+        LOGGER.warning("Unsupported J84 command: %r", value)
+
+    def set_hankaku_width_printing(self, *_):
+        """Select half-width kanji printing (``FS SI``)."""
+        self.hankaku_mode = True
+        self.jp_scripting = None
+        LOGGER.debug("J84 Half-width kanji mode: %s", self.hankaku_mode)
+
+    def unset_hankaku_width_printing(self, *_):
+        """Cancel half-width kanji printing (``FS DC2``)."""
+        self.hankaku_mode = False
+        self.jp_scripting = None
+        LOGGER.debug("J84 Half-width kanji mode: %s", self.hankaku_mode)
+
+    def set_double_width_printing_jp(self, *_):
+        """Select double-width printing for J84 characters (``FS SO``)."""
+        self.select_double_width_printing()
+
+    def unset_double_width_printing_jp(self, *_):
+        """Cancel double-width printing for J84 characters (``FS DC4``)."""
+        self.unset_double_width_printing()
+
+    def switch_quad_size_printing_jp(self, *args):
+        """Switch 2x2 size printing for J84 characters (``FS W``).
+
+        Value 0/48 disables the mode, 1/49 enables it.
+        """
+        if self._j84_last_binary_value(args):
+            self.double_width_multi = True
+            self.jp_double_height = True
+            self.character_width = None
+        else:
+            self.double_width_multi = False
+            self.jp_double_height = False
+            self.character_width = None
+        LOGGER.debug("double-width: %s", self.double_width)
+        LOGGER.debug("J84 double-height: %s", self.jp_double_height)
+
+    def switch_script_printing_jp(self, *args):
+        """Switch superscript/subscript printing (``FS r``).
+
+        Value 0/48 selects superscript, 1/49 selects subscript.
+        """
+        subscript = self._j84_last_binary_value(args)
+        self.jp_scripting = PrintScripting.SUB if subscript else PrintScripting.SUP
+        LOGGER.debug("J84 scripting: %s", self.jp_scripting)
+
+    def select_letter_quality_or_draft_jp(self, *args):
+        """Select either fine or draft kanji printing (``FS x``)."""
+        LOGGER.debug("J84 kanji printing quality (dummy)")
+
+    def switch_underline_jp(self, *args):
+        """Switch J84 underline (``FS -``).
+
+        Value 0 selects no underline, Value 1 selects 1-dot underline and
+        Value 2 selects 2-dot underline.
+        """
+        self.jp_underline = self._j84_last_numeric_value(args)
+        LOGGER.debug("J84 underline: %s", self.jp_underline)
+
+    def master_select_jp(self, *args):
+        """Set the J84 master select byte (``FS !``).
+
+        The individual bits are kept for future rendering support.
+
+        bitmasks :
+            1,    # vertical or horizontal, FS J vs FS K
+            2,    # hankaku FS SI, FS DC2
+            4,    # double width ESC W
+            8,    # double height (only selectable with FS !)
+            16,   # switch script printing FS r
+            32,   # subscript or superscript FS r
+            64,   # nothing
+            128,  # underline FS -
+        """
+        values = self._j84_byte_args(args)
+        value = values[0] if values else 0
+
+        self.jp_tategaki = bool(value & 0x01)
+        if value & 0x80:
+            # Keep the thickness selected by FS - (2 dots), otherwise enable
+            # the default 1-dot underline.
+            if self.jp_underline == 0:
+                self.jp_underline = 1
+        else:
+            self.jp_underline = 0
+
+        if (value & 0x04) or (value & 0x08):
+            self.double_width_multi = bool(value & 0x04)
+            self.jp_double_height = bool(value & 0x08)
+        else:
+            self.double_width_multi = False
+            self.jp_double_height = False
+            if value & 0x10:
+                if value & 0x20:
+                    self.jp_scripting = PrintScripting.SUB
+                else:
+                    self.jp_scripting = PrintScripting.SUP
+            else:
+                self.jp_scripting = None
+            if value & 0x02:
+                self.hankaku_mode = True
+
+        LOGGER.debug("J84 tategaki: %s", self.jp_tategaki)
+        LOGGER.debug("J84 scripting: %s", self.jp_scripting)
+        LOGGER.debug("double-width: %s", self.double_width)
+        LOGGER.debug("J84 double-height: %s", self.jp_double_height)
+        LOGGER.debug("J84 Half-width kanji mode: %s", self.hankaku_mode)
+        LOGGER.debug("J84 underline: %s", self.jp_underline)
+
+    def select_typeface_jp(self, *args):
+        """Select the J84 typeface (``FS k``).
+
+        Value 0/48 selects Mincho, 1/49 selects Gothic.
+        """
+        gothic = self._j84_last_binary_value(args)
+        self.jp_typeface = "gothic" if gothic else "mincho"
+        LOGGER.debug("J84 typeface: %s", self.jp_typeface)
+
+    def set_zenkaku_intercharacter_space(self, *args):
+        """Set intercharacter space for zenkaku characters (``FS S``).
+
+        .. todo:: Confirm the meaning of the two arguments against the manual.
+        """
+        values = self._j84_byte_args(args)
+        self.jp_zenkaku_space_L = values[0] if values else 0
+        self.jp_zenkaku_space_R = values[1] if len(values) > 1 else 0
+        LOGGER.debug(
+            "J84 zenkaku intercharacter space: left=%s, right=%s",
+            self.jp_zenkaku_space_L,
+            self.jp_zenkaku_space_R,
+        )
+
+    def set_hankaku_intercharacter_space(self, *args):
+        """Set intercharacter space for hankaku characters (``FS T``).
+
+        .. todo:: Confirm the meaning of the two arguments against the manual.
+        """
+        values = self._j84_byte_args(args)
+        self.jp_hankaku_space_L = values[0] if values else 0
+        self.jp_hankaku_space_R = values[1] if len(values) > 1 else 0
+        LOGGER.debug(
+            "J84 hankaku intercharacter space: left=%s, right=%s",
+            self.jp_hankaku_space_L,
+            self.jp_hankaku_space_R,
+        )
+
+    def set_hankaku_zenkaku_adjust(self, *_):
+        """Enable half-width/zenkaku adjustment (``FS U``)."""
+        self.jp_hankaku_zenkaku_adjust = True
+        LOGGER.debug("J84 hankaku/zenkaku adjust: %s", self.jp_hankaku_zenkaku_adjust)
+
+    def unset_hankaku_zenkaku_adjust(self, *_):
+        """Disable half-width/zenkaku adjustment (``FS V``)."""
+        self.jp_hankaku_zenkaku_adjust = False
+        LOGGER.debug("J84 hankaku/zenkaku adjust: %s", self.jp_hankaku_zenkaku_adjust)
+
+    def set_tategaki_printing(self, *_):
+        """Select vertical writing (``FS J``).
+
+        .. todo:: Vertical layout is not rendered yet.
+        """
+        self.jp_tategaki = True
+        LOGGER.debug("J84 tategaki: %s", self.jp_tategaki)
+
+    def unset_tategaki_printing(self, *_):
+        """Cancel vertical writing (``FS K``).
+
+        .. todo:: Vertical layout is not rendered yet.
+        """
+        self.jp_tategaki = False
+        LOGGER.debug("J84 tategaki: %s", self.jp_tategaki)
+
+    def hankaku_tate_kumi_printing(self, *args):
+        """Set half-width vertical typesetting (``FS D``).
+
+        .. todo:: Vertical layout is not rendered yet.
+        """
+        self.jp_hankaku_tate_kumi = self._j84_byte_args(args)
+        LOGGER.debug("J84 hankaku tate kumi: %s", self.jp_hankaku_tate_kumi)
+
+    def define_gaiji(self, *args):
+        """Define a 24x24 user-defined character (``FS 2``).
+
+        The character is stored under ``(0x77, code)``. Its bitmap is not
+        rendered yet; a geta mark is printed as a placeholder.
+        """
+        code = None
+        bitmap = None
+        for arg in args:
+            value = getattr(arg, "value", arg)
+            if not isinstance(value, (bytes, bytearray)):
+                continue
+            if value == b"\x1c":  # FS token
+                continue
+            if len(value) == 1:
+                code = value[0]
+            elif len(value) == 72:
+                bitmap = bytes(value)
+
+        if code is None or bitmap is None:
+            LOGGER.warning("Invalid user-defined character definition: %s", args)
+            return
+
+        self.gaiji[(0x77, code)] = bitmap
+        LOGGER.debug("J84 user-defined character 0x77 0x%02x defined", code)
+
     def run_esc_instruction(self, tree):
         """Recursive call of methods from the given parse tree
 
@@ -5021,7 +5659,7 @@ class ESCParser:
         :param tree: Lark tree of tokens, we use aliases as method names.
         :type tree: <lark.lexer.Tree>
         """
-        if tree.data in ("start", "instruction", "tiff_compressed_rule", "remote_mode"):
+        if tree.data in CONTAINER_RULES:
             # Recursive call
             _ = [
                 self.run_esc_instruction(child)

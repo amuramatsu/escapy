@@ -60,7 +60,15 @@ def default_config():
         "profile": "generic",
     }
 
-    return misc_section, roman_section, userdef_section, printer_section
+    japanese_section = {
+        "path": DIR_FONTS,
+        # Empty values keep the built-in CID font fallback
+        "mincho": "",
+        "gothic": "",
+        "hankaku": "",
+    }
+    return (misc_section, roman_section, userdef_section, printer_section,
+            japanese_section)
 
 
 @pytest.fixture()
@@ -106,6 +114,7 @@ def test_default_file(tear_down):
         expected_userdef_section,
         # Currently not added explicitely, handled by a fallback
         expected_printer_section,
+        expected_japanese_section,
     ) = default_config()
 
     # Transtype for easier debugging (original object has a different string rep)
@@ -114,12 +123,104 @@ def test_default_file(tear_down):
     found_sansserif_section = dict(sample_config["Sans serif"])
     found_userdef_section = dict(sample_config["UserDefinedCharacters"])
     # found_printer_section = dict(sample_config["printer"])
+    found_japanese_section = dict(sample_config["Japanese"])
 
     assert found_misc_section == expected_misc_section
     assert found_roman_section == expected_roman_section
     assert found_sansserif_section == expected_roman_section
     assert found_userdef_section == expected_userdef_section
     # assert found_printer_section == expected_printer_section
+    assert found_japanese_section == expected_japanese_section
+
+
+def test_japanese_font_paths(tmp_path, tear_down):
+    """Japanese font paths are resolved and forwarded to the parser."""
+    mincho = tmp_path / "mincho.ttf"
+    gothic = tmp_path / "gothic.otf"
+    hankaku = tmp_path / "hankaku.ttf"
+    for font_file in (mincho, gothic, hankaku):
+        font_file.touch()
+
+    config = configparser.ConfigParser()
+    config.read_string(
+        f"""
+        [misc]
+        [Japanese]
+        path = {tmp_path}
+        mincho = mincho.ttf
+        gothic = {gothic}
+        hankaku = hankaku.ttf
+        """
+    )
+
+    sample_config = parse_config(config)
+    japanese_section = sample_config["Japanese"]
+
+    assert japanese_section["mincho"] == str(mincho.resolve())
+    assert japanese_section["gothic"] == str(gothic.resolve())
+    assert japanese_section["hankaku"] == str(hankaku.resolve())
+
+    params = build_parser_params(sample_config)
+    assert params["japanese_fonts"] == {
+        "mincho": str(mincho.resolve()),
+        "gothic": str(gothic.resolve()),
+        "hankaku": str(hankaku.resolve()),
+    }
+
+
+def test_japanese_font_missing_file(tmp_path, tear_down):
+    """A configured Japanese font must exist."""
+    config = configparser.ConfigParser()
+    config.read_string(
+        f"""
+        [misc]
+        [Japanese]
+        path = {tmp_path}
+        mincho = missing.ttf
+        """
+    )
+
+    with pytest.raises(SystemExit):
+        parse_config(config)
+
+
+def test_japanese_font_bad_extension(tmp_path, tear_down):
+    """Only TTF and OTF files are accepted for Japanese fonts."""
+    font_file = tmp_path / "font.txt"
+    font_file.touch()
+
+    config = configparser.ConfigParser()
+    config.read_string(
+        f"""
+        [misc]
+        [Japanese]
+        path = {tmp_path}
+        gothic = font.txt
+        """
+    )
+
+    with pytest.raises(SystemExit):
+        parse_config(config)
+
+
+def test_japanese_font_default_path(tmp_path, tear_down):
+    """Relative Japanese font paths use default_font_path when path is empty."""
+    font_file = tmp_path / "default.ttf"
+    font_file.touch()
+
+    config = configparser.ConfigParser()
+    config.read_string(
+        f"""
+        [misc]
+        default_font_path = {tmp_path}
+        [Japanese]
+        hankaku = default.ttf
+        """
+    )
+
+    sample_config = parse_config(config)
+    assert sample_config["Japanese"]["path"] == str(tmp_path)
+    assert sample_config["Japanese"]["hankaku"] == str(font_file.resolve())
 
 
 @pytest.mark.parametrize(
@@ -305,6 +406,11 @@ def test_specific_settings(sample_config, expected_settings, tear_down):
                 "condensed_fallback": None,
                 "userdef_db_filepath": USER_DEFINED_DB_FILE,
                 "userdef_images_path": None,
+                "japanese_fonts": {
+                    "mincho": None,
+                    "gothic": None,
+                    "hankaku": None,
+                },
             },
         ),
         # floats for printable_area_margins_mm & page_size
@@ -333,6 +439,11 @@ def test_specific_settings(sample_config, expected_settings, tear_down):
                 "condensed_fallback": True,
                 "userdef_db_filepath": "xxx.json",
                 "userdef_images_path": "/tmp/xxx/",
+                "japanese_fonts": {
+                    "mincho": None,
+                    "gothic": None,
+                    "hankaku": None,
+                },
             },
         ),
         # ints for printable_area_margins_mm, alias for page_size
@@ -358,6 +469,11 @@ def test_specific_settings(sample_config, expected_settings, tear_down):
                 # Missing section defaults
                 "userdef_db_filepath": USER_DEFINED_DB_FILE,
                 "userdef_images_path": None,
+                "japanese_fonts": {
+                    "mincho": None,
+                    "gothic": None,
+                    "hankaku": None,
+                },
             },
         ),
     ],

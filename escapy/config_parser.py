@@ -35,6 +35,31 @@ from escapy.printer_profile import load_printer_profile
 
 LOGGER = logger()
 
+# Font files used by ESC/P 24-J84C (Japanese) printing.
+# Each value is an arbitrary TrueType/OpenType file; empty values keep the
+# built-in ReportLab CID font fallback.
+JAPANESE_FONT_KEYS = ("mincho", "gothic", "hankaku")
+
+
+def resolve_japanese_font_path(value, base_path):
+    """Resolve a Japanese font setting to an absolute path.
+
+    :param value: Font file path configured by the user.
+        Can be absolute or relative to ``base_path``.
+    :type value: str | None
+    :param base_path: Directory used to resolve relative paths.
+    :type base_path: str | Path
+    :return: Absolute resolved path, or None if no font is configured.
+    :rtype: Path | None
+    """
+    if not value:
+        return None
+
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path(base_path).expanduser() / path
+    return path.resolve()
+
 
 def load_config(config_file: Path = EMBEDDED_CONFIG_FILE):
     """Load configuration file and set default settings
@@ -195,6 +220,42 @@ def parse_config(config: configparser.ConfigParser):
             raise SystemExit(1) from exc
 
 
+    ## Japanese fonts section (ESC/P 24-J84C)
+    if not config.has_section("Japanese"):
+        config.add_section("Japanese")
+
+    jp_section = config["Japanese"]
+    if not jp_section.get("path"):
+        jp_section["path"] = default_font_path
+
+    # Empty values are valid: built-in CID fonts are used as fallback.
+    for font_key in JAPANESE_FONT_KEYS:
+        font_filepath = jp_section.get(font_key)
+        if font_filepath is None:
+            jp_section[font_key] = ""
+            continue
+        if not font_filepath:
+            continue
+
+        resolved_path = resolve_japanese_font_path(font_filepath, jp_section["path"])
+        if resolved_path.suffix.lower() not in (".ttf", ".otf"):
+            LOGGER.error(
+                "Japanese: %s must be a .ttf or .otf font (%s).",
+                font_key,
+                font_filepath,
+            )
+            raise SystemExit
+        if not resolved_path.is_file():
+            LOGGER.error(
+                "Japanese: %s font file not found (%s).", font_key, resolved_path
+            )
+            raise SystemExit
+
+        # Store the absolute path so that build_parser_params() and debug
+        # output are unambiguous.
+        jp_section[font_key] = str(resolved_path)
+
+
     ## Fonts sections
     mandatory_typefaces = ("Roman", "Sans serif")
     for typeface in TYPEFACE_NAMES.values():
@@ -275,6 +336,14 @@ def build_parser_params(config) -> dict:
     images_path = ud_section.get("images_path")
     userdef_images_path = None if not images_path else images_path
 
+    # Japanese fonts for ESC/P 24-J84C; None means built-in CID fallback.
+    jp_section = config["Japanese"] if config.has_section("Japanese") else {}
+    jp_base_path = jp_section.get("path") or misc_section["default_font_path"]
+    japanese_fonts = {}
+    for font_key in JAPANESE_FONT_KEYS:
+        font_path = resolve_japanese_font_path(jp_section.get(font_key), jp_base_path)
+        japanese_fonts[font_key] = str(font_path) if font_path else None
+
     return {
         "pins": pins,
         "printable_area_margins_mm": printable_area_margins_mm,
@@ -285,4 +354,5 @@ def build_parser_params(config) -> dict:
         "condensed_fallback": condensed_fallback,
         "userdef_db_filepath": ud_section["database_filepath"],
         "userdef_images_path": userdef_images_path,
+        "japanese_fonts": japanese_fonts,
     }
