@@ -48,12 +48,19 @@ unset_condensed_printing = b"\x12"  # DC2
 double_height = b"\x1Bw\x01"  # ESC w 1
 reset_double_height = b"\x1Bw\x00"  # ESC w 0
 
+def _F(path):
+    import sys
+    if sys.platform == 'win32':
+        return r"C:/Windows/Fonts/"
+    if sys.platform == 'darwin':
+        return "/Library/Fonts/"
+    return "/usr/share/fonts/truetype/" + path + "/"
 
 typefaces = {
     # FiraCode: doesn't support all languages
     0: {
         "fixed": partial(
-            find_font, "FiraCode", path="/usr/share/fonts/truetype/firacode/"
+            find_font, "FiraCode", path=_F("firacode")
         ),
         "proportional": lambda *_: None,
     },
@@ -64,7 +71,7 @@ typefaces = {
     },
     2: {
         "fixed": partial(
-            find_font, "Courier_New", path="/usr/share/fonts/truetype/msttcorefonts/"
+            find_font, "Courier_New", path=_F("msttcorefonts")
         ),
         "proportional": lambda *_: None,
     },
@@ -100,26 +107,26 @@ noto_font_def = {
     # Noto should allow all languages but the base name should be adapted.
     # Ex: NotoSansThai-*
     "fixed": partial(
-        find_font, "NotoSansMono", path="/usr/share/fonts/truetype/noto/"
+        find_font, "NotoSansMono", path=_F("noto")
     ),
     "proportional": partial(
-        find_font, "NotoSans-", path="/usr/share/fonts/truetype/noto/"
+        find_font, "NotoSans-", path=_F("noto")
     ),
 }
 
 noto_devanagari_font_def = {
     "fixed": partial(
-        find_font, "NotoSansDevanagari-", path="/usr/share/fonts/truetype/noto/"
+        find_font, "NotoSansDevanagari-", path=_F("noto")
     ),
     "proportional": lambda *_: None,
 }
 
 liberation_font_def = {
     "fixed": partial(
-        find_font, "LiberationMono", path="/usr/share/fonts/truetype/liberation/"
+        find_font, "LiberationMono", patqh=_F("liberation")
     ),
     "proportional": partial(
-        find_font, "LiberationSans", path="/usr/share/fonts/truetype/liberation/"
+        find_font, "LiberationSans", path=_F("liberation")
     ),
 }
 

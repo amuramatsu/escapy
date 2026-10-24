@@ -54,29 +54,36 @@ def test_reportlab_fallbacks(func, arguments, expected):
     found = func(*arguments)
     assert found == expected
 
+def _F(path, font):
+    import sys
+    if sys.platform == 'win32':
+        return r"C:/Windows/Fonts/" + font
+    if sys.platform == 'darwin':
+        return "/Library/Fonts/" + font
+    return "/usr/share/fonts/truetype/" + path + "/" + font
 
 @pytest.mark.parametrize(
     "arguments, expected",
     [   # args order: condensed, italic, bold
-        (("NotoSans-", True, True, True), Path("/usr/share/fonts/truetype/noto/NotoSans-ExtraCondensedBoldItalic.ttf")),
-        (("NotoSans-", False, False, False), Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf")),
-        (("NotoSans-", True, False, False), Path("/usr/share/fonts/truetype/noto/NotoSans-ExtraCondensed.ttf")),
-        (("NotoSans-", True, True, False), Path("/usr/share/fonts/truetype/noto/NotoSans-ExtraCondensedItalic.ttf")),
-        (("NotoSans-", True, False, True), Path("/usr/share/fonts/truetype/noto/NotoSans-ExtraCondensedBold.ttf")),
-        (("NotoSans-", False, True, True), Path("/usr/share/fonts/truetype/noto/NotoSans-BoldItalic.ttf")),
-        (("NotoSans-", False, True, False), Path("/usr/share/fonts/truetype/noto/NotoSans-Italic.ttf")),
-        (("NotoSans-", False, False, True), Path("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf")),
+        (("NotoSans-", True, True, True), Path(_F("noto", "NotoSans-ExtraCondensedBoldItalic.ttf"))),
+        (("NotoSans-", False, False, False), Path(_F("noto", "NotoSans-Regular.ttf"))),
+        (("NotoSans-", True, False, False), Path(_F("noto", "NotoSans-ExtraCondensed.ttf"))),
+        (("NotoSans-", True, True, False), Path(_F("noto", "NotoSans-ExtraCondensedItalic.ttf"))),
+        (("NotoSans-", True, False, True), Path(_F("noto", "NotoSans-ExtraCondensedBold.ttf"))),
+        (("NotoSans-", False, True, True), Path(_F("noto", "NotoSans-BoldItalic.ttf"))),
+        (("NotoSans-", False, True, False), Path(_F("noto", "NotoSans-Italic.ttf"))),
+        (("NotoSans-", False, False, True), Path(_F("noto", "NotoSans-Bold.ttf"))),
         # kwarg 'best' set to False: expect a list of Paths
         # only 1 match (the best font is found)
-        (("NotoSans-", False, False, False, False), [Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf")]),
+        (("NotoSans-", False, False, False, False), [Path(_F("noto", "NotoSans-Regular.ttf"))]),
         # same but multiple matchs are expected => content is not tested
         (("FiraCode", True, True, False, False), [0] * 2),
         # Non-existing font
         (("NONE_FAKE", False, False, False), None),
         # Non-existing font in the given path
-        (("NotoSans-", False, False, True, True, "/usr/share/fonts/truetype/firacode/"), None),
+        (("NotoSans-", False, False, True, True, _F("firacode/", "")), None),
         # Approximate result: condensed & italic are not available
-        (("FiraCode", True, True, True), Path("/usr/share/fonts/truetype/firacode/FiraCode-Bold.ttf")),
+        (("FiraCode", True, True, True), Path(_F("firacode", "FiraCode-Bold.ttf"))),
 
     ],
     ids=[
@@ -175,12 +182,12 @@ def erroneous_fonts():
     """Fixture that generates a badly formed font struct"""
     fonts = {
         0: {
-            "fixed": (lambda *args: Path("/usr/share/fonts/truetype/firacode/FiraCode-Bold.ttf")),
+            "fixed": (lambda *args: Path(_F("firacode", "FiraCode-Bold.ttf"))),
             # Not expected type
             "proportional": "foo",
         },
         2: {
-            "fixed": (lambda *args: Path("/usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf")),
+            "fixed": (lambda *args: Path(_F("firacode", "FiraCode-Regular.ttf"))),
             # Missing proportional key
         },
     }

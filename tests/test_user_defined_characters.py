@@ -519,6 +519,13 @@ def test_ram_codec():
     # Clean environment for further tests
     codecs.unregister(register_codec_func)
 
+def _F(path, font):
+    import sys
+    if sys.platform == 'win32':
+        return r"C:/Windows/Fonts/" + font
+    if sys.platform == 'darwin':
+        return "/Library/Fonts/" + font
+    return "/usr/share/fonts/truetype/" + path + "/" + font
 
 def test_select_user_defined_set(tmp_path: Path, normal_char_data: bytes):
     """Test real end-to-end example with user-defined char
@@ -547,11 +554,11 @@ def test_select_user_defined_set(tmp_path: Path, normal_char_data: bytes):
     # Inject font that support the char: FreeSans
     fonts = {
         0: {
-            "fixed": (lambda *args: Path("/usr/share/fonts/truetype/firacode/FiraCode-Bold.ttf")),
+            "fixed": (lambda *args: Path(_F("firacode", "FiraCode-Bold.ttf"))),
             "proportional": lambda *_: None,
         },
         1: {
-            "fixed": (lambda *args: Path("/usr/share/fonts/truetype/freefont/FreeSans.ttf")),
+            "fixed": (lambda *args: Path(_F("freefont", "FreeSans.ttf"))),
             "proportional": lambda *_: None,
         },
     }

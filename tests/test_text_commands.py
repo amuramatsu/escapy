@@ -189,18 +189,25 @@ def test_select_international_charset(format_databytes):
         escapy.international_charset == expected
     ), f"Expected charset {charset_name}"
 
+def _F(path, font):
+    import sys
+    if sys.platform == 'win32':
+        return r"C:/Windows/Fonts/" + font
+    if sys.platform == 'darwin':
+        return "/Library/Fonts/" + font
+    return "/usr/share/fonts/truetype/" + path + "/" + font
 
 @pytest.fixture()
 def partial_fonts():
     """Fixture that generates a minimal font struct"""
     fonts = {
         0: {
-            "fixed": (lambda *args: Path("/usr/share/fonts/truetype/firacode/FiraCode-Bold.ttf")),
+            "fixed": (lambda *args: Path(_F("firacode", "FiraCode-Bold.ttf"))),
             # Simulate a font not found
             "proportional": (lambda *args: None),
         },
         2: {
-            "fixed": (lambda *args: Path("/usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf")),
+            "fixed": (lambda *args: Path(_F("firacode", "FiraCode-Regular.ttf"))),
             # Fallback to a reportlab internal font
             "proportional": rptlab_times,
         },
@@ -212,9 +219,9 @@ def partial_fonts():
     "format_databytes, expected_typefaceid, expected_fontpath",
     [
         # Typeface ID 2: 'Courier' in printer notation (patched here: FiraCode-Regular)
-        (b"\x1bk\x02", 2, "/usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf"),
+        (b"\x1bk\x02", 2, _F("firacode", "FiraCode-Regular.ttf")),
         # Typeface ID 12 is not available: switch to default id (0) which is FiraCode-Bold
-        (b"\x1bk\x0c", 0, "/usr/share/fonts/truetype/firacode/FiraCode-Bold.ttf"),
+        (b"\x1bk\x0c", 0, _F("firacode", "FiraCode-Bold.ttf")),
         # Typeface ID 2: proportional alternative is choosen (Times)
         (b"\x1bp\x01" b"\x1bk\x02", 2, None),
         # Typeface ID 2: proportional alternative is choosen and triggered by ESC p (Times)
@@ -225,7 +232,7 @@ def partial_fonts():
         # PS: ESC p triggers set_font
         (b"\x1Bk\x02" b"\x1Bp\x01" b"\x1Bk\x00", 2, None),
         # Typeface change is refused when user-defined RAM characters are selected
-        (b"\x1b%\x01" b"\x1Bk\x02", 0, "/usr/share/fonts/truetype/firacode/FiraCode-Bold.ttf"),
+        (b"\x1b%\x01" b"\x1Bk\x02", 0, _F("firacode", "FiraCode-Bold.ttf")),
     ],
     # First param goes in the 'request' param of the fixture format_databytes
     indirect=["format_databytes"],
