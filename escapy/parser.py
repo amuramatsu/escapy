@@ -5504,6 +5504,81 @@ class ESCParser:
         self.jp_underline = self._j84_last_numeric_value(args)
         LOGGER.debug("J84 underline: %s", self.jp_underline)
 
+    def select_kanji_outline_size_jp(self, *args):
+        """Select the J84 kanji size / outline mode (``FS Y``).
+
+        The 6 parameters (spacing, height and width, in dots) are consumed so
+        that they are never printed as text, but the outline mode itself is not
+        implemented yet: the values are ignored.
+
+        .. todo:: Apply the outline mode and its sizes; see the 1994 manual,
+            page 3-63.
+        """
+        values = self._j84_byte_args(args)
+        if len(values) < 6:
+            LOGGER.warning("Malformed J84 command (ignored): FS Y %r", values)
+            return
+
+        spacing = values[0] + (values[1] << 8)
+        height = values[2] + (values[3] << 8)
+        width = values[4] + (values[5] << 8)
+        LOGGER.warning(
+            "J84 command not implemented (ignored): FS Y "
+            "spacing=%d, height=%d, width=%d dots",
+            spacing,
+            height,
+            width,
+        )
+
+    def switch_tategaki_charset_jp(self, *args):
+        """Switch the J84 vertical-writing character set (``FS e``).
+
+        Value 0 disables it, Value 1 enables it.
+
+        .. todo:: Implement the vertical writing character set; see the 1994
+            manual, page 3-65. The command is ignored for now.
+        """
+        enabled = self._j84_last_binary_value(args)
+        LOGGER.warning(
+            "J84 command not implemented (ignored): FS e (%s)",
+            "enabled" if enabled else "disabled",
+        )
+
+    def set_kanji_outline_spacing_jp(self, *args):
+        """Set the J84 kanji spacing (``FS c``).
+
+        The spacing is expressed in dots (``nL + nH * 256``, 1 to 1080). It
+        only applies in the kanji outline mode (``FS Y``).
+
+        .. todo:: Apply the spacing; see the 1994 manual, page 3-74. The
+            command is ignored for now.
+        """
+        values = self._j84_byte_args(args)
+        if len(values) < 2:
+            LOGGER.warning("Malformed J84 command (ignored): FS c %r", values)
+            return
+
+        spacing = values[0] + (values[1] << 8)
+        LOGGER.warning(
+            "J84 command not implemented (ignored): FS c spacing=%d dots",
+            spacing,
+        )
+
+    def select_kanji_baseline_jp(self, *args):
+        """Select the J84 kanji baseline position (``FS b``).
+
+        Value 0 selects the automatic baseline mode, Value 1 the fixed
+        baseline position mode.
+
+        .. todo:: Implement the baseline modes; see the 1994 manual, page
+            3-79. The command is ignored for now.
+        """
+        fixed = self._j84_last_binary_value(args)
+        LOGGER.warning(
+            "J84 command not implemented (ignored): FS b (%s)",
+            "fixed" if fixed else "automatic",
+        )
+
     def master_select_jp(self, *args):
         """Set the J84 master select byte (``FS !``).
 

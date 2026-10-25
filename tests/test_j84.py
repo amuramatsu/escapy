@@ -446,11 +446,45 @@ def test_all_j84_commands_are_idempotent():
         FS + b"T\x00\x00",
         FS + b"U",
         FS + b"V",
+        FS + b"Y\x00\x00\x18\x00\x18\x00",
+        FS + b"e1",
+        FS + b"c\x01\x00",
+        FS + b"b1",
         FS + b"2w!" + bitmap,
     ]
     escapy = ESCParser(build_block(*(commands * 2)), pdf=False)
 
     assert escapy.gaiji[(0x77, 0x21)] == bitmap
+
+
+@pytest.mark.parametrize(
+    "command, rule_name",
+    [
+        (FS + b"Y" + b"ABCDEF", "select_kanji_outline_size_jp"),
+        (FS + b"e1", "switch_tategaki_charset_jp"),
+        (FS + b"cAB", "set_kanji_outline_spacing_jp"),
+        (FS + b"b1", "select_kanji_baseline_jp"),
+    ],
+    ids=["FS_Y", "FS_e", "FS_c", "FS_b"],
+)
+def test_unimplemented_j84_commands_consume_their_arguments(
+    command, rule_name, caplog
+):
+    """FS Y/e/c/b arguments are consumed and never printed as text.
+
+    These commands are not implemented yet, but their arguments must not leak
+    into the character stream. Printable arguments are used on purpose: if they
+    were not consumed, they would be printed and would advance the cursor.
+    """
+    escapy = ESCParser(build_block(command + KANJI_A), pdf=False)
+
+    assert escapy.cursor_x == pytest.approx(
+        escapy.left_margin + J84_ZENKAKU_WIDTH + DEFAULT_ZENKAKU_SPACE
+    )
+    assert "J84 command not implemented" in caplog.text
+
+    # The commands are also recognized outside a kanji block.
+    assert rule_name in tree_names(init_parser(command))
 
 
 def test_switch_script_printing_jp():

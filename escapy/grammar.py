@@ -260,6 +260,10 @@ esc_grammar = r"""
         | FS "T" HALF_BYTE_ARG HALF_BYTE_ARG -> set_hankaku_intercharacter_space
         | FS "U" -> set_hankaku_zenkaku_adjust
         | FS "V" -> unset_hankaku_zenkaku_adjust
+        | FS "Y" BYTE_ARG BYTE_ARG BYTE_ARG BYTE_ARG BYTE_ARG BYTE_ARG -> select_kanji_outline_size_jp
+        | FS "e" BIN_ARG_EX -> switch_tategaki_charset_jp
+        | FS "c" BYTE_ARG BYTE_ARG -> set_kanji_outline_spacing_jp
+        | FS "b" BIN_ARG_EX -> select_kanji_baseline_jp
         | FS "2\x77" GAIJI_CODE GAIJI_BITMAP -> define_gaiji
 
     tiff_compressed_rule.2: tiff_enter tiff_instruction* exit_ex
@@ -373,7 +377,7 @@ esc_grammar = r"""
 
     # Unknown FS command: consume the FS byte and its command byte so that an
     # unsupported J84 command does not abort the whole parsing.
-    FS_UNKNOWN: /\x1c[^\x0e\x0f\x12\x14\x21\x26\x2d\x2e\x32\x44\x4a\x4b\x53\x54\x55\x56\x57\x6b\x72\x78]/
+    FS_UNKNOWN: /\x1c[^\x0e\x0f\x12\x14\x21\x26\x2d\x2e\x32\x44\x4a\x4b\x53\x54\x55\x56\x57\x59\x62\x63\x65\x6b\x72\x78]/
 
     # 0 1 2 3 4 5 6 7 32 33 38 39 40 71 72 73 + 64 65 70
     SELECT_BIT_IMAGE_HEADER: /[\x00-\x07\x20\x21\x26-\x28\x40\x41\x46-\x49].[\x00-\x1f]/s
